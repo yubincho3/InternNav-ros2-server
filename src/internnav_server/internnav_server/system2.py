@@ -213,7 +213,7 @@ class System2(Node):
         if history_ids:
             placeholder = '<image>\n' * len(history_ids)
             prompt_text += f' These are your historical observations: {placeholder}.'
-        prompt_text += ' in your sight is <image>.'
+        prompt_text += ' you can see <image>.'
 
         input_images = [self.rgb_list[hid] for hid in history_ids] + [pil_img]
         img_iter = iter(input_images)
@@ -237,7 +237,7 @@ class System2(Node):
             )
             input_images.append(pil_img)
             conversation_history.append({'role': 'user', 'content': [
-                {'type': 'text',  'text':  'in your sight is'},
+                {'type': 'text',  'text':  'you can see'},
                 {'type': 'image', 'image': pil_img},
                 {'type': 'text',  'text':  '.'},
             ]})
