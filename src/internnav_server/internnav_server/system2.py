@@ -1,12 +1,10 @@
+import os
 import re
+import sys
 
-import os as _os, sys as _sys
-_stderr_backup = _sys.stderr
-_sys.stderr = open(_os.devnull, 'w')
-from cv_bridge import CvBridge
-_sys.stderr.close()
-_sys.stderr = _stderr_backup
-del _stderr_backup
+from contextlib import redirect_stderr
+with open(os.devnull, 'w') as f, redirect_stderr(f):
+    from cv_bridge import CvBridge
 
 import numpy as np
 from PIL import Image as PILImage
@@ -14,17 +12,23 @@ from PIL import Image as PILImage
 import torch
 from transformers import AutoProcessor
 
+# ros2
 import rclpy
 from rclpy.node import Node
 from rclpy.qos import QoSProfile, ReliabilityPolicy, HistoryPolicy
 
+# ros2 msgs
 from std_msgs.msg import Empty, String
 from sensor_msgs.msg import Image
 
+# User defined msgs
 from internnav_interfaces.msg import DiscreteStamped
 from internnav_server_interfaces.msg import Latent, PlanContext
 
-from internnav_server.internvla_n1.internvla_n1_system2 import InternVLAN1System2
+from pathlib import Path
+sys.path.insert(0, str(Path(__file__).parents[3] / 'InternNav'))
+
+from internnav.model.basemodel.internvla_n1.internvla_n1_system2 import InternVLAN1System2
 
 _ACTION_MAP = {'STOP': 0, '↑': 1, '←': 2, '→': 3, '↓': 5}
 _ACTION_PATTERN = re.compile('|'.join(re.escape(k) for k in _ACTION_MAP))

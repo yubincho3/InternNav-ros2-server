@@ -1,12 +1,10 @@
+import os
+import sys
 from typing import Optional
 
-import os as _os, sys as _sys
-_stderr_backup = _sys.stderr
-_sys.stderr = open(_os.devnull, 'w')
-from cv_bridge import CvBridge
-_sys.stderr.close()
-_sys.stderr = _stderr_backup
-del _stderr_backup
+from contextlib import redirect_stderr
+with open(os.devnull, 'w') as f, redirect_stderr(f):
+    from cv_bridge import CvBridge
 
 import cv2
 import numpy as np
@@ -26,7 +24,10 @@ from geometry_msgs.msg import Point
 from internnav_interfaces.msg import TrajectoryStamped, DiscreteStamped
 from internnav_server_interfaces.msg import PlanContext
 
-from internnav_server.internvla_n1.trt.system1_runner import TRTSystem1Runner
+from pathlib import Path
+sys.path.insert(0, str(Path(__file__).parents[3] / 'InternNav'))
+
+from internnav.model.basemodel.internvla_n1.trt.system1_runner import TRTSystem1Runner
 
 class System1(Node):
     def __init__(self):
