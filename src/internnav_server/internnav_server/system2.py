@@ -37,16 +37,13 @@ class System2(Node):
     def __init__(self):
         super().__init__('internvla_n1_system2')
 
-        self.s2_step = 0
-        self.rgb_list = []
-
         self.declare_parameter('model_path', '')
         self.declare_parameter('device', 'cuda:0')
         self.declare_parameter('resize_w', 384)
         self.declare_parameter('resize_h', 384)
         self.declare_parameter('num_history', 8)
         self.declare_parameter('rgb_topic', '')
-        self.declare_parameter('instruction', 'Go to the red circle.')
+        self.declare_parameter('instruction', 'Move to the yellow cone.')
 
         model_path = self.get_parameter('model_path')\
             .get_parameter_value().string_value
@@ -80,7 +77,8 @@ class System2(Node):
         self.model = InternVLAN1System2.from_pretrained_system2(
             model_path, 
             torch_dtype=torch.bfloat16,
-            device_map={'': self.device}
+            device_map={'': self.device},
+            attn_implementation='flash_attention_2'
         )
         self.model.eval()
 
@@ -91,6 +89,7 @@ class System2(Node):
         # TODO: torch.compile 적용
         # 못할수도?
         self._warmup()
+        self.initialize()
 
         # TODO: YOLO(LOVON) Integration
         # ---- YOLO 모델 로드 ----
@@ -118,8 +117,8 @@ class System2(Node):
             qos
         )
 
-        # Subscribe reset topic (에피소드 전환 시 s2_step·rgb_list 초기화)
-        self.create_subscription(Empty, '/internnav/server/initialize', self.reset, 1)
+        # Subscribe initialize topic (에피소드 전환 시 s2_step·rgb_list 초기화)
+        self.create_subscription(Empty, '/internnav/server/initialize', self.initialize, 1)
 
         # Subscribe instruction(update) topic
         self.create_subscription(String, '/internnav/server/instruction', self.instruction_callback, 1)
@@ -129,29 +128,36 @@ class System2(Node):
             # f'(YOLO conf={self.yolo_conf_threshold}, resize=({self.resize_w}, {self.resize_h})'
         )
 
-    @torch.inference_mode()
+    def _build_content(self, prompt_text, images):
+        img_iter = iter(images)
+        content = []
+        for part in re.split(r'(<image>)', prompt_text):
+            if part == '<image>':
+                content.append({'type': 'image', 'image': next(img_iter)})
+            else:
+                clean = part.replace('\n', '').strip()
+                if clean:
+                    content.append({'type': 'text', 'text': clean})
+        return content
+
     def _warmup(self):
-        self.get_logger().info('System2 warmup started...')
+        self.get_logger().info('Warming up System2 model...')
 
-        dummy_image = PILImage.new('RGB', (self.resize_w, self.resize_h), color='red')
-        messages = [{
-            'role': 'user',
-            'content': [
-                {'type': 'image', 'image': dummy_image},
-                {'type': 'text', 'text':  self.instruction},
-            ]
-        }]
-        text = self.processor.apply_chat_template(messages, tokenize=False, add_generation_prompt=True)
-        inputs = self.processor(text=[text], images=[dummy_image], return_tensors='pt').to(self.device)
-
-        output_ids = self.model.generate(**inputs, max_new_tokens=5, do_sample=False, temperature=None, top_p=None, top_k=None)
+        dummy_image = PILImage.new('RGB', (self.resize_w, self.resize_h), color='black')
+        base_text = (
+            "You are an autonomous navigation assistant. Your task is to hello. "
+            "Where should you go next to stay on track? "
+            "Please output the next waypoint's coordinates in the image. "
+            "Please output STOP when you have successfully completed the task."
+        )
+        prompt_text = base_text + ' you can see <image>.'
+        conversation = [{'role': 'user', 'content': self._build_content(prompt_text, [dummy_image])}]
+        output_ids, inputs, _ = self._run_inference(conversation, [dummy_image])
         self.model.generate_latents(
             output_ids,
             inputs['pixel_values'],
             inputs['image_grid_thw'],
         )
-
-        self.get_logger().info('System2 warmup done')
 
     @torch.inference_mode()
     def _run_inference(self, conversation_history, input_images):
@@ -175,22 +181,25 @@ class System2(Node):
             output_ids[0][inputs['input_ids'].shape[1]:],
             skip_special_tokens=True
         )
-        self.get_logger().info(f'LLM: {llm_output}')
 
         return output_ids, inputs, llm_output
 
+    def initialize(self, _=None):
+        self.s2_step = 0
+        self.rgb_list = []
+        torch.cuda.empty_cache()
+        self.get_logger().info('System2 initialized')
+
     def instruction_callback(self, msg: String):
         self.instruction = msg.data
-        
         self.get_logger().info(f'Instruction updated: {self.instruction}')
 
     def image_callback(self, rgb_msg: Image):
+        self.get_logger().info(f'image_callback, {self.s2_step}')
         # 1. ROS Image → PIL, 히스토리에 추가
         cv_img = self.cv_bridge.imgmsg_to_cv2(rgb_msg, desired_encoding='passthrough')
-        if rgb_msg.encoding == 'bgr8':
-            import cv2
-            cv_img = cv2.cvtColor(cv_img, cv2.COLOR_BGR2RGB)
-        pil_img = PILImage.fromarray(cv_img).resize((self.resize_w, self.resize_h))
+        pil_img_full = PILImage.fromarray(cv_img).convert('RGB')
+        pil_img = pil_img_full.resize((self.resize_w, self.resize_h))
         self.rgb_list.append(pil_img)
         episode_idx = len(self.rgb_list) - 1
 
@@ -216,32 +225,28 @@ class System2(Node):
         prompt_text += ' you can see <image>.'
 
         input_images = [self.rgb_list[hid] for hid in history_ids] + [pil_img]
-        img_iter = iter(input_images)
-        content = []
-        for part in re.split(r'(<image>)', prompt_text):
-            if part == '<image>':
-                content.append({'type': 'image', 'image': next(img_iter)})
-            else:
-                clean = part.replace('\n', '').strip()
-                if clean:
-                    content.append({'type': 'text', 'text': clean})
-        conversation_history = [{'role': 'user', 'content': content}]
+        conversation_history = [{'role': 'user', 'content': self._build_content(prompt_text, input_images)}]
 
         # 4. 1차 추론
         output_ids, inputs, llm_output = self._run_inference(conversation_history, input_images)
 
         # 5. look_down: ↓ 출력 시 conversation 이어서 재추론
-        if not bool(re.search(r'\d', llm_output)) and '↓' in llm_output:
+        if '↓' in llm_output:
+            self.get_logger().warn('Look down detected, re-inferring...')
             conversation_history.append(
                 {'role': 'assistant', 'content': [{'type': 'text', 'text': llm_output}]}
             )
-            input_images.append(pil_img)
+            input_images.append(pil_img_full)
             conversation_history.append({'role': 'user', 'content': [
                 {'type': 'text',  'text':  'you can see'},
-                {'type': 'image', 'image': pil_img},
+                {'type': 'image', 'image': pil_img_full},
                 {'type': 'text',  'text':  '.'},
             ]})
             output_ids, inputs, llm_output = self._run_inference(conversation_history, input_images)
+            assert llm_output != '', 'Last llm_output should not be empty when look down!'
+
+        self.get_logger().info(f'[Step {self.s2_step}] {llm_output}')
+        self.s2_step += 1
 
         # 6. 파싱 및 publish
         is_pixel_goal = bool(re.search(r'\d', llm_output))
@@ -265,22 +270,17 @@ class System2(Node):
             self.plan_ctx_pub.publish(ctx_msg)
         else:
             actions = [_ACTION_MAP[m] for m in _ACTION_PATTERN.findall(llm_output)]
-            actions = actions[:1]
             if not actions:
-                self.get_logger().warn(f'[S2 step {self.s2_step}] Unrecognized output, skipping')
+                self.get_logger().warn('Unrecognized output, skipping')
                 return
+            if actions == [5] or actions == [9]:
+                self.get_logger().warn('Look down after re-inference, dropping')
+                return
+
             discrete_msg = DiscreteStamped()
             discrete_msg.header.stamp = rgb_msg.header.stamp
-            discrete_msg.actions = actions
+            discrete_msg.actions = actions[:1] #####
             self.discrete_pub.publish(discrete_msg)
-
-        self.s2_step += 1
-
-    def reset(self, _=None):
-        self.s2_step = 0
-        self.rgb_list = []
-        torch.cuda.empty_cache()
-        self.get_logger().info('System2 reset')
 
 def main(args=None):
     rclpy.init(args=args)
