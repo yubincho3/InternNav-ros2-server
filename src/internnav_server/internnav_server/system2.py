@@ -37,6 +37,8 @@ class System2(Node):
     def __init__(self):
         super().__init__('internvla_n1_system2')
 
+        self.cv_bridge = CvBridge()
+
         self.declare_parameter('model_path', '')
         self.declare_parameter('device', 'cuda:0')
         self.declare_parameter('resize_w', 384)
@@ -61,7 +63,6 @@ class System2(Node):
             .get_parameter_value().string_value
 
         # TODO: YOLO(LOVON) Integration
-        # ---- YOLO ----
         # self.declare_parameter('yolo_model', 'yolo26x.pt')
         # self.declare_parameter('yolo_conf_threshold', 0.3)
         # self.declare_parameter('yolo_object_extraction_model_path')
@@ -71,7 +72,6 @@ class System2(Node):
         # self.yolo_conf_threshold = self.get_parameter('yolo_conf_threshold').get_parameter_value().double_value
         # yolo_obj_model_path = self.get_parameter('yolo_object_extraction_model_path').get_parameter_value().string_value
         # yolo_tokenizer_path = self.get_parameter('yolo_tokenizer_path').get_parameter_value().string_value
-        # ---- YOLO ----
 
         self.get_logger().info(f'Loading System2 model...')
         self.model = InternVLAN1System2.from_pretrained_system2(
@@ -85,31 +85,35 @@ class System2(Node):
         self.processor = AutoProcessor.from_pretrained(model_path, use_fast=False)
         self.processor.tokenizer.padding_side = 'left'
 
-        # ---- torch.compile (dynamic=True: 가변 토큰 길이) ----
         # TODO: torch.compile 적용
         # 못할수도?
+
         self._warmup()
         self.initialize()
 
         # TODO: YOLO(LOVON) Integration
-        # ---- YOLO 모델 로드 ----
         # YOLO 통합할 땐 모델을 먼저 TensorRT로 컴파일해서 불러오기!
         # self.get_logger().info(f'Loading YOLO model ({yolo_model})...')
         # self.yolo_model_inst = None
         # self.object_extractor = None
-        # self.get_logger().info('YOLO model loaded')
 
-        self.cv_bridge = CvBridge()
-        self.plan_ctx_pub = self.create_publisher(PlanContext, '/internnav/server/plan_context', 1)
-        self.discrete_pub = self.create_publisher(DiscreteStamped, '/internnav/server/discrete', 1)
+        self.plan_ctx_pub = self.create_publisher(
+            PlanContext,
+            '/internnav/server/plan_context',
+            1
+        )
 
-        # Subscribe image topic
+        self.discrete_pub = self.create_publisher(
+            DiscreteStamped,
+            '/internnav/server/discrete',
+            1
+        )
+
         qos = QoSProfile(
             reliability=ReliabilityPolicy.BEST_EFFORT,
             history=HistoryPolicy.KEEP_LAST,
             depth=1,
         )
-
         self.create_subscription(
             Image,
             rgb_topic,
@@ -117,11 +121,19 @@ class System2(Node):
             qos
         )
 
-        # Subscribe initialize topic (에피소드 전환 시 s2_step·rgb_list 초기화)
-        self.create_subscription(Empty, '/internnav/server/initialize', self.initialize, 1)
+        self.create_subscription(
+            Empty,
+            '/internnav/server/initialize',
+            self.initialize,
+            1
+        )
 
-        # Subscribe instruction(update) topic
-        self.create_subscription(String, '/internnav/server/instruction', self.instruction_callback, 1)
+        self.create_subscription(
+            String,
+            '/internnav/server/instruction',
+            self.instruction_callback,
+            1
+        )
 
         self.get_logger().info(
             'System2 node ready'
@@ -129,15 +141,17 @@ class System2(Node):
         )
 
     def _build_content(self, prompt_text, images):
-        img_iter = iter(images)
         content = []
+
+        img_iter = iter(images)
         for part in re.split(r'(<image>)', prompt_text):
             if part == '<image>':
                 content.append({'type': 'image', 'image': next(img_iter)})
             else:
                 clean = part.replace('\n', '').strip()
                 if clean:
-                    content.append({'type': 'text', 'text': clean})
+                    content.append({'type': 'text', 'text': clean})            
+        
         return content
 
     def _warmup(self):
@@ -195,15 +209,12 @@ class System2(Node):
         self.get_logger().info(f'Instruction updated: {self.instruction}')
 
     def image_callback(self, rgb_msg: Image):
-        self.get_logger().info(f'image_callback, {self.s2_step}')
-        # 1. ROS Image → PIL, 히스토리에 추가
         cv_img = self.cv_bridge.imgmsg_to_cv2(rgb_msg, desired_encoding='passthrough')
         pil_img_full = PILImage.fromarray(cv_img).convert('RGB')
         pil_img = pil_img_full.resize((self.resize_w, self.resize_h))
         self.rgb_list.append(pil_img)
         episode_idx = len(self.rgb_list) - 1
 
-        # 2. 히스토리 프레임 균등 샘플링
         if episode_idx == 0:
             history_ids = []
         else:
@@ -211,7 +222,6 @@ class System2(Node):
                 np.linspace(0, episode_idx - 1, self.num_history, dtype=np.int32)
             ).tolist()
 
-        # 3. Conversation 구성 — temp.py와 동일하게 text string 먼저 만들고 split+clean
         base_text = (
             f"You are an autonomous navigation assistant. Your task is to {self.instruction}. "
             "Where should you go next to stay on track? "
@@ -227,12 +237,10 @@ class System2(Node):
         input_images = [self.rgb_list[hid] for hid in history_ids] + [pil_img]
         conversation_history = [{'role': 'user', 'content': self._build_content(prompt_text, input_images)}]
 
-        # 4. 1차 추론
         output_ids, inputs, llm_output = self._run_inference(conversation_history, input_images)
 
-        # 5. look_down: ↓ 출력 시 conversation 이어서 재추론
+        # Look down -> re-infer to get pixel goal
         if '↓' in llm_output:
-            self.get_logger().warn('Look down detected, re-inferring...')
             conversation_history.append(
                 {'role': 'assistant', 'content': [{'type': 'text', 'text': llm_output}]}
             )
@@ -248,7 +256,6 @@ class System2(Node):
         self.get_logger().info(f'[Step {self.s2_step}] {llm_output}')
         self.s2_step += 1
 
-        # 6. 파싱 및 publish
         is_pixel_goal = bool(re.search(r'\d', llm_output))
         if is_pixel_goal:
             with torch.inference_mode():
@@ -269,7 +276,7 @@ class System2(Node):
 
             self.plan_ctx_pub.publish(ctx_msg)
         else:
-            actions = [_ACTION_MAP[m] for m in _ACTION_PATTERN.findall(llm_output)]
+            actions = [_ACTION_MAP[m] for m in _ACTION_PATTERN.findall(llm_output) if m in _ACTION_MAP]
             if not actions:
                 self.get_logger().warn('Unrecognized output, skipping')
                 return
@@ -279,7 +286,7 @@ class System2(Node):
 
             discrete_msg = DiscreteStamped()
             discrete_msg.header.stamp = rgb_msg.header.stamp
-            discrete_msg.actions = actions[:1] #####
+            discrete_msg.actions = actions[:1] ####################
             self.discrete_pub.publish(discrete_msg)
 
 def main(args=None):

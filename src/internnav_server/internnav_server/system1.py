@@ -114,10 +114,11 @@ class System1(Node):
         self._plan_warned = False
         self.get_logger().info('System1 initialized')
 
-    def discrete_callback(self, msg: DiscreteStamped):
+    def discrete_callback(self, _):
         if self.last_s2_step == -1:
             return
-        self.get_logger().info(f'[S1] Discrete action received, resetting state')
+
+        self.get_logger().info(f'Discrete action received, resetting state')
         self.initialize()
 
     def plan_callback(self, msg: PlanContext):
@@ -128,12 +129,14 @@ class System1(Node):
         ).reshape(*msg.latent.shape)
 
         ref_img = self.cv_bridge.imgmsg_to_cv2(msg.reference_rgb, desired_encoding='passthrough')
-        if msg.reference_rgb.encoding == 'bgr8':
-            ref_img = cv2.cvtColor(ref_img, cv2.COLOR_BGR2RGB)
         img = cv2.resize(ref_img, (224, 224))
+        if msg.reference_rgb.encoding == 'bgr8':
+            img = cv2.cvtColor(img, cv2.COLOR_BGR2RGB)
         self.latest_ref_tensor = torch.from_numpy(img)\
             .to(self.device, dtype=torch.float32) / 255
+
         self.last_s2_step = msg.s2_step
+        self.get_logger().info(f'New latent received, Step {msg.s2_step}')
 
     def image_callback(self, msg: Image):
         if self.last_s2_step == -1:
@@ -181,14 +184,6 @@ class System1(Node):
             msg_traj.waypoints.append(pt)
 
         self.traj_pub.publish(msg_traj)
-
-        total_dist = float(np.sum(np.linalg.norm(np.diff(traj_result, axis=0), axis=1)))
-        self.get_logger().info(
-            f'[S1] s2_step={self.last_s2_step} | '
-            f'latent={list(self.latest_latent.shape)} | '
-            f'traj_len={traj_result.shape[0]} | '
-            f'dist={total_dist:.3f}'
-        )
 
 def main(args=None):
     rclpy.init(args=args)
