@@ -32,7 +32,7 @@ from internnav.model.basemodel.internvla_n1.trt.system1_runner import TRTSystem1
 
 class System1(Node):
     def __init__(self):
-        super().__init__('internvla_n1_system1')
+        super().__init__('internnav_system1')
 
         self.cv_bridge = CvBridge()
 

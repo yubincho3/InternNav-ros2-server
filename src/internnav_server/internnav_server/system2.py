@@ -36,7 +36,7 @@ _ACTION_PATTERN = re.compile(r'^(STOP|[↑←→↓]{1,4})$')
 
 class System2(Node):
     def __init__(self):
-        super().__init__('internvla_n1_system2')
+        super().__init__('internnav_system2')
 
         self.cv_bridge = CvBridge()
 
