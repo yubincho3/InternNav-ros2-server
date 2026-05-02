@@ -3,7 +3,7 @@
 GPU inference workspace for InternNav.
 Runs two cooperative nodes that together perform vision-language navigation (VLN) reasoning and continuous trajectory generation for the Unitree Go2 robot.
 
-## Prerequisites
+## 🔧 Prerequisites
 
 ### TensorRT
 - System1 requires TensorRT to be available on the system.
@@ -22,7 +22,7 @@ TODO!!!
 
 ---
 
-## Packages
+## 📦 Packages
 
 | Package | Build Type | Description |
 |---------|------------|-------------|
@@ -31,7 +31,7 @@ TODO!!!
 
 ---
 
-## Nodes
+## 🤖 Nodes
 
 ### `internnav_system2` — VLN Understanding
 
@@ -96,7 +96,7 @@ Runs a TensorRT-optimized DiT-based trajectory generation model that converts th
 
 ---
 
-## Internal Messages
+## 📨 Internal Messages
 
 ### `Latent.msg`
 
@@ -118,7 +118,7 @@ uint32 s2_step                   # System2 inference step counter
 ```
 
 ---
-## Build
+## 🛠️ Build
 
 ### 1. Installation
 
@@ -198,7 +198,7 @@ colcon build --symlink-install
 
 ---
 
-## Launch
+## 🚀 Launch
 
 ```bash
 # Terminal 1. Turn on zenoh bridge
@@ -237,11 +237,11 @@ ros2 launch internnav_server realworld.launch.py \
 
 System1 runs on `cuda:0`, System2 on `cuda:1` by default (configurable in the launch file).
 
-## Acknowledgements
+## 👏 Acknowledgements
 
 This project is based on [InternNav](https://github.com/InternRobotics/InternNav) by Intern Robotics.
 The original codebase has been adapted from an HTTP/multi-threaded architecture to a ROS 2 architecture for real-world deployment on the Unitree Go2.
 
-## License
+## 📄 License
 
 This project is licensed under the Apache 2.0 License. See [LICENSE](LICENSE) for details.
