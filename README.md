@@ -236,3 +236,12 @@ ros2 launch internnav_server realworld.launch.py \
 | `s2_model_path` | Path to the System2 model directory (output of `split_model.py`) |
 
 System1 runs on `cuda:0`, System2 on `cuda:1` by default (configurable in the launch file).
+
+## Acknowledgements
+
+This project is based on [InternNav](https://github.com/InternRobotics/InternNav) by Intern Robotics.
+The original codebase has been adapted from an HTTP/multi-threaded architecture to a ROS 2 architecture for real-world deployment on the Unitree Go2.
+
+## License
+
+This project is licensed under the Apache 2.0 License. See [LICENSE](LICENSE) for details.
