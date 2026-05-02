@@ -16,16 +16,17 @@ from rclpy.node import Node
 from rclpy.qos import QoSProfile, ReliabilityPolicy, HistoryPolicy
 
 # ros2 msgs
+from geometry_msgs.msg import PoseStamped
+from nav_msgs.msg import Path
 from sensor_msgs.msg import Image
 from std_msgs.msg import Empty
-from geometry_msgs.msg import Point
 
 # User defined msgs
-from internnav_interfaces.msg import TrajectoryStamped, DiscreteStamped
+from internnav_interfaces.msg import DiscreteStamped
 from internnav_server_interfaces.msg import PlanContext
 
-from pathlib import Path
-sys.path.insert(0, str(Path(__file__).parents[3] / 'InternNav'))
+import pathlib
+sys.path.insert(0, str(pathlib.Path(__file__).parents[3] / 'InternNav'))
 
 from internnav.model.basemodel.internvla_n1.trt.system1_runner import TRTSystem1Runner
 
@@ -47,32 +48,11 @@ class System1(Node):
             .get_parameter_value().string_value
 
         self._load_model(model_path)
-        self.initialize()
+        self.reset()
 
-        self.create_subscription(
-            Empty,
-            '/internnav/server/initialize',
-            self.initialize,
-            1
-        )
-
-        self.create_subscription(
-            PlanContext,
-            '/internnav/server/plan_context',
-            self.plan_callback,
-            1
-        )
-
-        self.create_subscription(
-            DiscreteStamped,
-            '/internnav/server/discrete',
-            self.discrete_callback,
-            1
-        )
-
-        self.traj_pub = self.create_publisher(
-            TrajectoryStamped,
-            '/internnav/server/trajectory',
+        self.path_pub = self.create_publisher(
+            Path,
+            '/internnav/server/system1/output_path',
             1
         )
 
@@ -81,12 +61,29 @@ class System1(Node):
             history=HistoryPolicy.KEEP_LAST,
             depth=1,
         )
-
         self.create_subscription(
             Image,
             rgb_topic,
             self.image_callback,
             qos
+        )
+        self.create_subscription(
+            Empty,
+            '/internnav/server/cmd_reset',
+            self.reset,
+            1
+        )
+        self.create_subscription(
+            PlanContext,
+            '/internnav/server/system2/plan_context',
+            self.plan_callback,
+            1
+        )
+        self.create_subscription(
+            DiscreteStamped,
+            '/internnav/server/system2/output_discretes',
+            self.discretes_callback,
+            1
         )
 
         self.get_logger().info('System1 node ready')
@@ -107,19 +104,12 @@ class System1(Node):
  
         self.get_logger().info('System1 node initialized')
 
-    def initialize(self, _=None):
-        self.latest_latent: Optional[torch.Tensor] = None
-        self.latest_ref_tensor: Optional[torch.Tensor] = None
-        self.last_s2_step: int = -1
-        self._plan_warned = False
-        self.get_logger().info('System1 initialized')
-
-    def discrete_callback(self, _):
+    def discretes_callback(self, _):
         if self.last_s2_step == -1:
             return
 
-        self.get_logger().info(f'Discrete action received, resetting state')
-        self.initialize()
+        self.get_logger().info('Discrete action received, resetting state')
+        self.reset()
 
     def plan_callback(self, msg: PlanContext):
         self.latest_latent = torch.tensor(
@@ -172,18 +162,27 @@ class System1(Node):
         traj_result = np.zeros((33, 2))
         traj_result[1:] = cumsum_xy
 
-        msg_traj = TrajectoryStamped()
-        msg_traj.header = msg.header
+        path_msg = Path()
+        path_msg.header.frame_id = 'base_footprint'
+        path_msg.header.stamp = msg.header.stamp
 
         for i in range(traj_result.shape[0]):
-            pt = Point(
-                x=float(traj_result[i, 0]),
-                y=float(traj_result[i, 1]),
-                z=0.0
-            )
-            msg_traj.waypoints.append(pt)
+            pose = PoseStamped()
 
-        self.traj_pub.publish(msg_traj)
+            pose.header = path_msg.header
+            pose.pose.position.x = float(traj_result[i, 0])
+            pose.pose.position.y = float(traj_result[i, 1])
+
+            path_msg.poses.append(pose)
+
+        self.path_pub.publish(path_msg)
+
+    def reset(self, _=None):
+        self.latest_latent: Optional[torch.Tensor] = None
+        self.latest_ref_tensor: Optional[torch.Tensor] = None
+        self.last_s2_step: int = -1
+        self._plan_warned = False
+        self.get_logger().info('System1 initialized')
 
 def main(args=None):
     rclpy.init(args=args)

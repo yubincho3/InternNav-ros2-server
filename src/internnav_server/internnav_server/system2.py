@@ -31,7 +31,8 @@ sys.path.insert(0, str(Path(__file__).parents[3] / 'InternNav'))
 from internnav.model.basemodel.internvla_n1.internvla_n1_system2 import InternVLAN1System2
 
 _ACTION_MAP = {'STOP': 0, '↑': 1, '←': 2, '→': 3, '↓': 5}
-_ACTION_PATTERN = re.compile('|'.join(re.escape(k) for k in _ACTION_MAP))
+_COORD_PATTERN = re.compile(r'^(\d{1,3}) (\d{1,3})$')
+_ACTION_PATTERN = re.compile(r'^(STOP|[↑←→↓]{1,4})$')
 
 class System2(Node):
     def __init__(self):
@@ -89,7 +90,7 @@ class System2(Node):
         # 못할수도?
 
         self._warmup()
-        self.initialize()
+        self.reset()
 
         # TODO: YOLO(LOVON) Integration
         # YOLO 통합할 땐 모델을 먼저 TensorRT로 컴파일해서 불러오기!
@@ -99,13 +100,12 @@ class System2(Node):
 
         self.plan_ctx_pub = self.create_publisher(
             PlanContext,
-            '/internnav/server/plan_context',
+            '/internnav/server/system2/plan_context',
             1
         )
-
-        self.discrete_pub = self.create_publisher(
+        self.discretes_pub = self.create_publisher(
             DiscreteStamped,
-            '/internnav/server/discrete',
+            '/internnav/server/system2/output_discretes',
             1
         )
 
@@ -120,17 +120,15 @@ class System2(Node):
             self.image_callback,
             qos
         )
-
         self.create_subscription(
             Empty,
-            '/internnav/server/initialize',
-            self.initialize,
+            '/internnav/server/cmd_reset',
+            self.reset,
             1
         )
-
         self.create_subscription(
             String,
-            '/internnav/server/instruction',
+            '/internnav/server/system2/instruction',
             self.instruction_callback,
             1
         )
@@ -154,6 +152,7 @@ class System2(Node):
         
         return content
 
+    @torch.inference_mode()
     def _warmup(self):
         self.get_logger().info('Warming up System2 model...')
 
@@ -197,12 +196,6 @@ class System2(Node):
         )
 
         return output_ids, inputs, llm_output
-
-    def initialize(self, _=None):
-        self.s2_step = 0
-        self.rgb_list = []
-        torch.cuda.empty_cache()
-        self.get_logger().info('System2 initialized')
 
     def instruction_callback(self, msg: String):
         self.instruction = msg.data
@@ -253,11 +246,12 @@ class System2(Node):
             output_ids, inputs, llm_output = self._run_inference(conversation_history, input_images)
             assert llm_output != '', 'Last llm_output should not be empty when look down!'
 
-        self.get_logger().info(f'[Step {self.s2_step}] {llm_output}')
+        llm_output = llm_output.strip().upper()
+
+        self.get_logger().info(f'[Step {self.s2_step}] LLM: {llm_output}')
         self.s2_step += 1
 
-        is_pixel_goal = bool(re.search(r'\d', llm_output))
-        if is_pixel_goal:
+        if _COORD_PATTERN.fullmatch(llm_output):
             with torch.inference_mode():
                 latent = self.model.generate_latents(
                     output_ids,
@@ -275,19 +269,32 @@ class System2(Node):
             ctx_msg.s2_step = self.s2_step
 
             self.plan_ctx_pub.publish(ctx_msg)
-        else:
-            actions = [_ACTION_MAP[m] for m in _ACTION_PATTERN.findall(llm_output) if m in _ACTION_MAP]
-            if not actions:
-                self.get_logger().warn('Unrecognized output, skipping')
-                return
-            if actions == [5] or actions == [9]:
-                self.get_logger().warn('Look down after re-inference, dropping')
-                return
+
+        elif _ACTION_PATTERN.fullmatch(llm_output):
+            if llm_output == 'STOP':
+                actions = [_ACTION_MAP['STOP']]
+            else:
+                if '↓' in llm_output:
+                    self.get_logger().warn('Look down after re-inference, dropping')
+                    return
+
+                actions = [_ACTION_MAP[c] for c in llm_output]
 
             discrete_msg = DiscreteStamped()
+            discrete_msg.header.frame_id = 'base_footprint'
             discrete_msg.header.stamp = rgb_msg.header.stamp
             discrete_msg.actions = actions[:1] ####################
-            self.discrete_pub.publish(discrete_msg)
+            self.discretes_pub.publish(discrete_msg)
+
+        else:
+            self.get_logger().warn('Unrecognized output, skipping')
+            return
+
+    def reset(self, _=None):
+        self.s2_step = 0
+        self.rgb_list = []
+        torch.cuda.empty_cache()
+        self.get_logger().info('System2 initialized')
 
 def main(args=None):
     rclpy.init(args=args)
