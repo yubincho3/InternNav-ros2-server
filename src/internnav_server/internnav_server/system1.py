@@ -126,7 +126,7 @@ class System1(Node):
             .to(self.device, dtype=torch.float32) / 255
 
         self.last_s2_step = msg.s2_step
-        self.get_logger().info(f'New latent received, Step {msg.s2_step}')
+        self.get_logger().info(f'[Step {msg.s2_step}] New latent received')
 
     def image_callback(self, msg: Image):
         if self.last_s2_step == -1:
