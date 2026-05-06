@@ -208,12 +208,14 @@ class System2(Node):
         self.rgb_list.append(pil_img)
         episode_idx = len(self.rgb_list) - 1
 
-        if episode_idx == 0:
-            history_ids = []
+        if self.num_history >= episode_idx:
+            history_ids = [*range(episode_idx)]
+        elif self.num_history == 1:
+            history_ids = [episode_idx - 1]
         else:
-            history_ids = np.unique(
-                np.linspace(0, episode_idx - 1, self.num_history, dtype=np.int32)
-            ).tolist()
+            end = episode_idx - 1
+            denom = self.num_history - 1
+            history_ids = [(end * i) // denom for i in range(self.num_history)]
 
         base_text = (
             f"You are an autonomous navigation assistant. Your task is to {self.instruction}. "
