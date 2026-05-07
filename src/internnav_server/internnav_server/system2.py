@@ -1,12 +1,6 @@
-import os
 import re
 import sys
 
-from contextlib import redirect_stderr
-with open(os.devnull, 'w') as f, redirect_stderr(f):
-    from cv_bridge import CvBridge
-
-import numpy as np
 from PIL import Image as PILImage
 
 import torch
@@ -28,6 +22,7 @@ from internnav_server_interfaces.msg import Latent, PlanContext
 from pathlib import Path
 sys.path.insert(0, str(Path(__file__).parents[3] / 'InternNav'))
 
+import internnav_server.utils as utils
 from internnav.model.basemodel.internvla_n1.internvla_n1_system2 import InternVLAN1System2
 
 _ACTION_MAP = {'STOP': 0, '↑': 1, '←': 2, '→': 3, '↓': 5}
@@ -37,8 +32,6 @@ _ACTION_PATTERN = re.compile(r'^(STOP|[↑←→↓]{1,4})$')
 class System2(Node):
     def __init__(self):
         super().__init__('internnav_system2')
-
-        self.cv_bridge = CvBridge()
 
         self.declare_parameter('model_path', '')
         self.declare_parameter('device', 'cuda:0')
@@ -106,6 +99,11 @@ class System2(Node):
         self.discretes_pub = self.create_publisher(
             DiscreteStamped,
             '/internnav/server/system2/output_discretes',
+            1
+        )
+        self.viz_pub = self.create_publisher(
+            Image,
+            '/internnav/server/debug_image',
             1
         )
 
@@ -202,8 +200,8 @@ class System2(Node):
         self.get_logger().info(f'Instruction updated: {self.instruction}')
 
     def image_callback(self, rgb_msg: Image):
-        cv_img = self.cv_bridge.imgmsg_to_cv2(rgb_msg, desired_encoding='passthrough')
-        pil_img_full = PILImage.fromarray(cv_img).convert('RGB')
+        cv_img = utils.imgmsg_to_cv2(rgb_msg, desired_encoding='rgb8')
+        pil_img_full = PILImage.fromarray(cv_img)
         pil_img = pil_img_full.resize((self.resize_w, self.resize_h))
         self.rgb_list.append(pil_img)
         episode_idx = len(self.rgb_list) - 1
@@ -271,6 +269,19 @@ class System2(Node):
             ctx_msg.s2_step = self.s2_step
 
             self.plan_ctx_pub.publish(ctx_msg)
+
+            if self.viz_pub.get_subscription_count() > 0:
+                viz_msg = utils.cv2_to_imgmsg(
+                    utils.annotate_image(
+                        episode_idx,
+                        pil_img_full,
+                        llm_output,
+                        pixel_goal=tuple(map(int, llm_output.split()))
+                    ),
+                    encoding='rgb8'
+                )
+                viz_msg.header = rgb_msg.header
+                self.viz_pub.publish(viz_msg)
 
         elif _ACTION_PATTERN.fullmatch(llm_output):
             if llm_output == 'STOP':

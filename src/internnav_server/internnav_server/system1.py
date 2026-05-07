@@ -1,10 +1,5 @@
-import os
 import sys
 from typing import Optional
-
-from contextlib import redirect_stderr
-with open(os.devnull, 'w') as f, redirect_stderr(f):
-    from cv_bridge import CvBridge
 
 import cv2
 import numpy as np
@@ -28,13 +23,12 @@ from internnav_server_interfaces.msg import PlanContext
 import pathlib
 sys.path.insert(0, str(pathlib.Path(__file__).parents[3] / 'InternNav'))
 
+import internnav_server.utils as utils
 from internnav.model.basemodel.internvla_n1.trt.system1_runner import TRTSystem1Runner
 
 class System1(Node):
     def __init__(self):
         super().__init__('internnav_system1')
-
-        self.cv_bridge = CvBridge()
 
         self.declare_parameter('rgb_topic', '')
         self.declare_parameter('model_path', '')
@@ -118,10 +112,8 @@ class System1(Node):
             device=self.device
         ).reshape(*msg.latent.shape)
 
-        ref_img = self.cv_bridge.imgmsg_to_cv2(msg.reference_rgb, desired_encoding='passthrough')
+        ref_img = utils.imgmsg_to_cv2(msg.reference_rgb, desired_encoding='rgb8')
         img = cv2.resize(ref_img, (224, 224))
-        if msg.reference_rgb.encoding == 'bgr8':
-            img = cv2.cvtColor(img, cv2.COLOR_BGR2RGB)
         self.latest_ref_tensor = torch.from_numpy(img)\
             .to(self.device, dtype=torch.float32) / 255
 
@@ -136,9 +128,7 @@ class System1(Node):
 
             return
 
-        raw_img = self.cv_bridge.imgmsg_to_cv2(msg, desired_encoding='passthrough')
-        if msg.encoding == 'bgr8':
-            raw_img = cv2.cvtColor(raw_img, cv2.COLOR_BGR2RGB)
+        raw_img = utils.imgmsg_to_cv2(msg, desired_encoding='rgb8')
         img = cv2.resize(raw_img, (224, 224))
         img_tensor = torch.from_numpy(img)\
             .to(self.device, dtype=torch.float32) / 255
