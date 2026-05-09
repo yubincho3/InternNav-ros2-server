@@ -3,12 +3,13 @@ import sys
 
 from PIL import Image as PILImage
 
+import numpy as np
 import torch
 from transformers import AutoProcessor
 
 # ros2
 import rclpy
-from rclpy.node import Node
+from rclpy.lifecycle import LifecycleNode, TransitionCallbackReturn, State
 from rclpy.qos import QoSProfile, ReliabilityPolicy, HistoryPolicy
 
 # ros2 msgs
@@ -29,7 +30,7 @@ _ACTION_MAP = {'STOP': 0, '↑': 1, '←': 2, '→': 3, '↓': 5}
 _COORD_PATTERN = re.compile(r'^(\d{1,3}) (\d{1,3})$')
 _ACTION_PATTERN = re.compile(r'^(STOP|[↑←→↓]{1,4})$')
 
-class System2(Node):
+class System2(LifecycleNode):
     def __init__(self):
         super().__init__('internnav_system2')
 
@@ -41,19 +42,23 @@ class System2(Node):
         self.declare_parameter('rgb_topic', '')
         self.declare_parameter('instruction', 'Move to the yellow cone.')
 
+        self._model = None
+        self._processor = None
+
+    def on_configure(self, state: State) -> TransitionCallbackReturn:
         model_path = self.get_parameter('model_path')\
             .get_parameter_value().string_value
-        self.device = self.get_parameter('device')\
+        self._device = self.get_parameter('device')\
             .get_parameter_value().string_value
-        self.resize_w = self.get_parameter('resize_w')\
+        self._resize_w = self.get_parameter('resize_w')\
             .get_parameter_value().integer_value
-        self.resize_h = self.get_parameter('resize_h')\
+        self._resize_h = self.get_parameter('resize_h')\
             .get_parameter_value().integer_value
-        self.num_history = self.get_parameter('num_history')\
+        self._num_history = self.get_parameter('num_history')\
             .get_parameter_value().integer_value
-        rgb_topic = self.get_parameter('rgb_topic')\
+        self._rgb_topic = self.get_parameter('rgb_topic')\
             .get_parameter_value().string_value
-        self.instruction = self.get_parameter('instruction')\
+        self._instruction = self.get_parameter('instruction')\
             .get_parameter_value().string_value
 
         # TODO: YOLO(LOVON) Integration
@@ -67,74 +72,93 @@ class System2(Node):
         # yolo_obj_model_path = self.get_parameter('yolo_object_extraction_model_path').get_parameter_value().string_value
         # yolo_tokenizer_path = self.get_parameter('yolo_tokenizer_path').get_parameter_value().string_value
 
-        self.get_logger().info(f'Loading System2 model...')
-        self.model = InternVLAN1System2.from_pretrained_system2(
+        self.get_logger().info('Loading System2 model...')
+        self._model = InternVLAN1System2.from_pretrained_system2(
             model_path, 
             torch_dtype=torch.bfloat16,
-            device_map={'': self.device},
+            device_map={'': self._device},
             attn_implementation='flash_attention_2'
         )
-        self.model.eval()
+        self._model.eval()
 
-        self.processor = AutoProcessor.from_pretrained(model_path, use_fast=False)
-        self.processor.tokenizer.padding_side = 'left'
+        self._processor = AutoProcessor.from_pretrained(model_path, use_fast=False)
+        self._processor.tokenizer.padding_side = 'left'
 
         # TODO: torch.compile 적용
         # 못할수도?
 
         self._warmup()
-        self.reset()
+        self._reset_state()
 
-        # TODO: YOLO(LOVON) Integration
-        # YOLO 통합할 땐 모델을 먼저 TensorRT로 컴파일해서 불러오기!
-        # self.get_logger().info(f'Loading YOLO model ({yolo_model})...')
-        # self.yolo_model_inst = None
-        # self.object_extractor = None
-
-        self.plan_ctx_pub = self.create_publisher(
+        self._plan_ctx_pub = self.create_lifecycle_publisher(
             PlanContext,
             '/internnav/server/system2/plan_context',
             1
         )
-        self.discretes_pub = self.create_publisher(
+        self._discretes_pub = self.create_lifecycle_publisher(
             DiscreteStamped,
             '/internnav/server/system2/output_discretes',
             1
         )
-        self.viz_pub = self.create_publisher(
+        self._viz_pub = self.create_lifecycle_publisher(
             Image,
             '/internnav/server/debug_image',
             1
         )
-
-        qos = QoSProfile(
-            reliability=ReliabilityPolicy.BEST_EFFORT,
-            history=HistoryPolicy.KEEP_LAST,
-            depth=1,
-        )
-        self.create_subscription(
-            Image,
-            rgb_topic,
-            self.image_callback,
-            qos
-        )
-        self.create_subscription(
+        self._cmd_reset_sub = self.create_subscription(
             Empty,
             '/internnav/server/cmd_reset',
-            self.reset,
+            self._reset_callback,
             1
         )
-        self.create_subscription(
+        self._instruction_sub = self.create_subscription(
             String,
             '/internnav/server/system2/instruction',
-            self.instruction_callback,
+            self._instruction_callback,
             1
         )
 
         self.get_logger().info(
             'System2 node ready'
-            # f'(YOLO conf={self.yolo_conf_threshold}, resize=({self.resize_w}, {self.resize_h})'
+            # f'(YOLO conf={self.yolo_conf_threshold}, resize=({self._resize_w}, {self._resize_h})'
         )
+        return TransitionCallbackReturn.SUCCESS
+
+    def on_activate(self, state: State) -> TransitionCallbackReturn:
+        qos = QoSProfile(
+            reliability=ReliabilityPolicy.BEST_EFFORT,
+            history=HistoryPolicy.KEEP_LAST,
+            depth=1,
+        )
+        self._image_sub = self.create_subscription(
+            Image,
+            self._rgb_topic,
+            self._image_callback,
+            qos
+        )
+
+        self.get_logger().info('System2 activated')
+        return super().on_activate(state)
+
+    def on_deactivate(self, state: State) -> TransitionCallbackReturn:
+        self.destroy_subscription(self._image_sub)
+        self._reset_state()
+        self.get_logger().info('System2 deactivated')
+        return super().on_deactivate(state)
+
+    def on_cleanup(self, state: State) -> TransitionCallbackReturn:
+        self.destroy_subscription(self._cmd_reset_sub)
+        self.destroy_subscription(self._instruction_sub)
+        self.destroy_publisher(self._plan_ctx_pub)
+        self.destroy_publisher(self._discretes_pub)
+        self.destroy_publisher(self._viz_pub)
+        self._model = None
+        self._processor = None
+        torch.cuda.empty_cache()
+        return TransitionCallbackReturn.SUCCESS
+
+    def on_shutdown(self, state: State) -> TransitionCallbackReturn:
+        return TransitionCallbackReturn.SUCCESS
 
     def _build_content(self, prompt_text, images):
         content = []
@@ -154,7 +178,7 @@ class System2(Node):
     def _warmup(self):
         self.get_logger().info('Warming up System2 model...')
 
-        dummy_image = PILImage.new('RGB', (self.resize_w, self.resize_h), color='black')
+        dummy_image = PILImage.new('RGB', (self._resize_w, self._resize_h), color='black')
         base_text = (
             "You are an autonomous navigation assistant. Your task is to hello. "
             "Where should you go next to stay on track? "
@@ -164,7 +188,7 @@ class System2(Node):
         prompt_text = base_text + ' you can see <image>.'
         conversation = [{'role': 'user', 'content': self._build_content(prompt_text, [dummy_image])}]
         output_ids, inputs, _ = self._run_inference(conversation, [dummy_image])
-        self.model.generate_latents(
+        self._model.generate_latents(
             output_ids,
             inputs['pixel_values'],
             inputs['image_grid_thw'],
@@ -172,14 +196,14 @@ class System2(Node):
 
     @torch.inference_mode()
     def _run_inference(self, conversation_history, input_images):
-        text = self.processor.apply_chat_template(
+        text = self._processor.apply_chat_template(
             conversation_history, tokenize=False, add_generation_prompt=True
         )
-        inputs = self.processor(
+        inputs = self._processor(
             text=[text], images=input_images, return_tensors='pt'
-        ).to(self.model.device)
+        ).to(self._model.device)
 
-        output_ids = self.model.generate(
+        output_ids = self._model.generate(
             **inputs,
             max_new_tokens=128,
             do_sample=False,
@@ -188,35 +212,45 @@ class System2(Node):
             top_k=None,
         )
 
-        llm_output = self.processor.tokenizer.decode(
+        llm_output = self._processor.tokenizer.decode(
             output_ids[0][inputs['input_ids'].shape[1]:],
             skip_special_tokens=True
         )
 
         return output_ids, inputs, llm_output
 
-    def instruction_callback(self, msg: String):
-        self.instruction = msg.data
-        self.get_logger().info(f'Instruction updated: {self.instruction}')
+    def _reset_state(self):
+        self._s2_step = 0
+        self._rgb_list = []
+        if self._model is not None:
+            torch.cuda.empty_cache()
 
-    def image_callback(self, rgb_msg: Image):
+    def _reset_callback(self, _=None):
+        self._reset_state()
+        self.get_logger().info('System2 state reset')
+
+    def _instruction_callback(self, msg: String):
+        self._instruction = msg.data
+        self.get_logger().info(f'Instruction updated: {self._instruction}')
+
+    def _image_callback(self, rgb_msg: Image):
         cv_img = utils.imgmsg_to_cv2(rgb_msg, desired_encoding='rgb8')
         pil_img_full = PILImage.fromarray(cv_img)
-        pil_img = pil_img_full.resize((self.resize_w, self.resize_h))
-        self.rgb_list.append(pil_img)
-        episode_idx = len(self.rgb_list) - 1
+        pil_img = pil_img_full.resize((self._resize_w, self._resize_h))
+        self._rgb_list.append(pil_img)
+        episode_idx = len(self._rgb_list) - 1
 
-        if self.num_history >= episode_idx:
+        if self._num_history >= episode_idx:
             history_ids = [*range(episode_idx)]
-        elif self.num_history == 1:
+        elif self._num_history == 1:
             history_ids = [episode_idx - 1]
         else:
             end = episode_idx - 1
-            denom = self.num_history - 1
-            history_ids = [(end * i) // denom for i in range(self.num_history)]
+            denom = self._num_history - 1
+            history_ids = [(end * i) // denom for i in range(self._num_history)]
 
         base_text = (
-            f"You are an autonomous navigation assistant. Your task is to {self.instruction}. "
+            f"You are an autonomous navigation assistant. Your task is to {self._instruction}. "
             "Where should you go next to stay on track? "
             "Please output the next waypoint's coordinates in the image. "
             "Please output STOP when you have successfully completed the task."
@@ -227,7 +261,7 @@ class System2(Node):
             prompt_text += f' These are your historical observations: {placeholder}.'
         prompt_text += ' you can see <image>.'
 
-        input_images = [self.rgb_list[hid] for hid in history_ids] + [pil_img]
+        input_images = [self._rgb_list[hid] for hid in history_ids] + [pil_img]
         conversation_history = [{'role': 'user', 'content': self._build_content(prompt_text, input_images)}]
 
         output_ids, inputs, llm_output = self._run_inference(conversation_history, input_images)
@@ -248,12 +282,12 @@ class System2(Node):
 
         llm_output = llm_output.strip().upper()
 
-        self.get_logger().info(f'[Step {self.s2_step}] LLM: {llm_output}')
-        self.s2_step += 1
+        self.get_logger().info(f'[Step {self._s2_step}] LLM: {llm_output}')
+        self._s2_step += 1
 
         if _COORD_PATTERN.fullmatch(llm_output):
             with torch.inference_mode():
-                latent = self.model.generate_latents(
+                latent = self._model.generate_latents(
                     output_ids,
                     inputs['pixel_values'],
                     inputs['image_grid_thw'],
@@ -263,14 +297,20 @@ class System2(Node):
             latent_msg.shape = list(latent.shape)
             latent_msg.data = latent.cpu().float().flatten().tolist()
 
+            ref_img = utils.cv2_to_imgmsg(
+                np.array(pil_img_full.resize((224, 224))),
+                encoding='rgb8'
+            )
+            ref_img.header = rgb_msg.header
+
             ctx_msg = PlanContext()
             ctx_msg.latent = latent_msg
-            ctx_msg.reference_rgb = rgb_msg
-            ctx_msg.s2_step = self.s2_step
+            ctx_msg.reference_rgb = ref_img
+            ctx_msg.s2_step = self._s2_step
 
-            self.plan_ctx_pub.publish(ctx_msg)
+            self._plan_ctx_pub.publish(ctx_msg)
 
-            if self.viz_pub.get_subscription_count() > 0:
+            if self._viz_pub.get_subscription_count() > 0:
                 viz_msg = utils.cv2_to_imgmsg(
                     utils.annotate_image(
                         episode_idx,
@@ -281,7 +321,7 @@ class System2(Node):
                     encoding='rgb8'
                 )
                 viz_msg.header = rgb_msg.header
-                self.viz_pub.publish(viz_msg)
+                self._viz_pub.publish(viz_msg)
 
         elif _ACTION_PATTERN.fullmatch(llm_output):
             if llm_output == 'STOP':
@@ -297,17 +337,10 @@ class System2(Node):
             discrete_msg.header.frame_id = 'base_footprint'
             discrete_msg.header.stamp = rgb_msg.header.stamp
             discrete_msg.actions = actions[:1] ####################
-            self.discretes_pub.publish(discrete_msg)
+            self._discretes_pub.publish(discrete_msg)
 
         else:
             self.get_logger().warn('Unrecognized output, skipping')
-            return
-
-    def reset(self, _=None):
-        self.s2_step = 0
-        self.rgb_list = []
-        torch.cuda.empty_cache()
-        self.get_logger().info('System2 initialized')
 
 def main(args=None):
     rclpy.init(args=args)

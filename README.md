@@ -1,7 +1,7 @@
 # InternNav-ros2-server
 
 GPU inference workspace for InternNav.
-Runs two cooperative nodes that together perform vision-language navigation (VLN) reasoning and continuous trajectory generation for the Unitree Go2 robot.
+Runs two cooperative lifecycle nodes that together perform vision-language navigation (VLN) reasoning and continuous trajectory generation for the Unitree Go2 robot, managed by a lifecycle manager node.
 
 ## 🔧 Prerequisites
 
@@ -26,14 +26,16 @@ TODO!!!
 
 | Package | Build Type | Description |
 |---------|------------|-------------|
-| `internnav_server` | ament_python | ROS 2 nodes — System1 and System2 |
+| `internnav_server` | ament_python | Lifecycle nodes — System1 and System2 |
 | `internnav_server_interfaces` | ament_cmake | Internal message types (Latent, PlanContext) |
+| `internnav_manager` | ament_python | Lifecycle manager node |
+| `internnav_bringup` | ament_python | Launch file to bring up server nodes together |
 
 ---
 
 ## 🤖 Nodes
 
-### `internnav_system2` — VLN Understanding
+### `internnav_system2` — VLN Understanding *(LifecycleNode)*
 
 Runs InternVLA-N1 (a multimodal VLN model built on Qwen2.5 VL) to interpret natural language navigation instructions against a rolling window of RGB observations.
 
@@ -42,7 +44,7 @@ Runs InternVLA-N1 (a multimodal VLN model built on Qwen2.5 VL) to interpret natu
 | Name | Type | Default | Description |
 |------|------|---------|-------------|
 | `model_path` | string | — | Path to the System2 model directory (output of `split_model.py`) |
-| `device` | string | `cuda:0` | CUDA device for inference |
+| `device` | string | `cuda:1` | CUDA device for inference |
 | `rgb_topic` | string | — | Input camera topic name |
 | `resize_w` | int | `384` | Target width to resize images before inference |
 | `resize_h` | int | `384` | Target height to resize images before inference |
@@ -51,22 +53,22 @@ Runs InternVLA-N1 (a multimodal VLN model built on Qwen2.5 VL) to interpret natu
 
 **Subscribed Topics**
 
-| Topic | Type | Description |
-|-------|------|-------------|
-| `{rgb_topic}` | `sensor_msgs/Image` | Live RGB stream |
-| `/internnav/server/system2/instruction` | `std_msgs/String` | Updates navigation instruction at runtime |
-| `/internnav/server/cmd_reset` | `std_msgs/Empty` | Resets internal state |
+| Topic | Type | Lifecycle | Description |
+|-------|------|-----------|-------------|
+| `{rgb_topic}` | `sensor_msgs/Image` | active only | Live RGB stream |
+| `/internnav/server/system2/instruction` | `std_msgs/String` | always | Updates navigation instruction at runtime |
+| `/internnav/server/cmd_reset` | `std_msgs/Empty` | always | Resets internal state |
 
 **Published Topics**
 
 | Topic | Type | Description |
 |-------|------|-------------|
-| `/internnav/server/system2/plan_context` | `internnav_server_interfaces/PlanContext` | Latent features + reference image forwarded to System1 |
+| `/internnav/server/system2/plan_context` | `internnav_server_interfaces/PlanContext` | Latent features + reference image (224×224) forwarded to System1 |
 | `/internnav/server/system2/output_discretes` | `internnav_interfaces/DiscreteStamped` | Discrete action sequence for the planner |
 
 ---
 
-### `internnav_system1` — Trajectory Generation
+### `internnav_system1` — Trajectory Generation *(LifecycleNode)*
 
 Runs a TensorRT-optimized DiT-based trajectory generation model that converts the latent context from System2 into a 2D trajectory in the robot body frame.
 
@@ -80,19 +82,52 @@ Runs a TensorRT-optimized DiT-based trajectory generation model that converts th
 
 **Subscribed Topics**
 
-| Topic | Type | Description |
-|-------|------|-------------|
-| `{rgb_topic}` | `sensor_msgs/Image` | Live RGB stream |
-| `/internnav/server/system2/plan_context` | `internnav_server_interfaces/PlanContext` | Latent + reference image from System2 |
-| `/internnav/server/system2/output_discretes` | `internnav_interfaces/DiscreteStamped` | Triggers planning reset on new discrete action |
-| `/internnav/server/cmd_reset` | `std_msgs/Empty` | Resets internal state |
-| `/utlidar/robot_odom` | `nav_msgs/Odometry` | Robot odometry |
+| Topic | Type | Lifecycle | Description |
+|-------|------|-----------|-------------|
+| `{rgb_topic}` | `sensor_msgs/Image` | active only | Live RGB stream |
+| `/internnav/server/system2/plan_context` | `internnav_server_interfaces/PlanContext` | active only | Latent + reference image from System2 |
+| `/internnav/server/system2/output_discretes` | `internnav_interfaces/DiscreteStamped` | active only | Triggers planning reset on new discrete action |
+| `/internnav/server/cmd_reset` | `std_msgs/Empty` | always | Resets internal state |
 
 **Published Topics**
 
 | Topic | Type | Description |
 |-------|------|-------------|
 | `/internnav/server/system1/output_path` | `nav_msgs/Path` | Trajectory in `base_footprint` frame |
+
+---
+
+### `internnav_manager` — Lifecycle Manager
+
+Manages the lifecycle of all four nodes (server-side and client-side) via ROS 2 lifecycle services.
+
+**Published Topics**
+
+| Topic | Type | Description |
+|-------|------|-------------|
+| `/internnav/system_state` | `std_msgs/String` | Current system state |
+
+**System States**
+
+| State | Description |
+|-------|-------------|
+| `INACTIVE` | All nodes deactivated |
+| `ACTIVATING` | Activation sequence in progress |
+| `ACTIVE` | All nodes active and running |
+| `DEACTIVATING` | Deactivation sequence in progress |
+| `ERROR` | A transition failed; all nodes have been deactivated |
+
+**Services**
+
+| Service | Type | Description |
+|---------|------|-------------|
+| `/internnav/activate` | `std_srvs/Trigger` | Sequentially configure & activate all nodes |
+| `/internnav/deactivate` | `std_srvs/Trigger` | Sequentially deactivate all nodes |
+
+**Activation sequence:** `internnav_controller` → `internnav_planner` → `internnav_system1` → `internnav_system2`  
+**Deactivation sequence:** same order
+
+On activation failure, all nodes are deactivated before reporting `ERROR`.
 
 ---
 
@@ -113,7 +148,7 @@ Full planning context passed from System2 to System1.
 
 ```
 Latent latent                    # extracted latent features
-sensor_msgs/Image reference_rgb  # reference image at decision point
+sensor_msgs/Image reference_rgb  # reference image (224×224) at decision point
 uint32 s2_step                   # System2 inference step counter
 ```
 
@@ -204,10 +239,10 @@ colcon build --symlink-install
 # Terminal 1. Turn on zenoh bridge
 zenoh-bridge-ros2dds -c <path to zenoh config>
 
-# Terminal 2. Launch InternNav server
+# Terminal 2. Launch InternNav server + manager
 source /opt/ros/<distro>/setup.bash
 source InternNav_ws/install/setup.bash
-ros2 launch internnav_server realworld.launch.py \
+ros2 launch internnav_bringup realworld.launch.py \
   rgb_topic:=/rgb/image/topic/name \
   s1_model_path:=<path to split>/system1/model.engine \
   s2_model_path:=<path to split>/system2
@@ -221,7 +256,7 @@ zenoh-bridge-ros2dds -c zenoh-config.json5
 # Terminal 2
 source /opt/ros/humble/setup.bash
 source InternNav_ws/install/setup.bash
-ros2 launch internnav_server realworld.launch.py \
+ros2 launch internnav_bringup realworld.launch.py \
   rgb_topic:=/camera/color/image_raw \
   s1_model_path:=checkpoints/system1/model.engine \
   s2_model_path:=checkpoints/system2
@@ -229,13 +264,25 @@ ros2 launch internnav_server realworld.launch.py \
 
 **Launch arguments**
 
-| Argument | Description |
-|----------|-------------|
-| `rgb_topic` | ROS topic for the RGB camera stream |
-| `s1_model_path` | Path to the System1 TensorRT `.engine` file (output of `convert_sys1_trt.py`) |
-| `s2_model_path` | Path to the System2 model directory (output of `split_model.py`) |
+| Argument | Default | Description |
+|----------|---------|-------------|
+| `rgb_topic` | — | ROS topic for the RGB camera stream |
+| `s1_model_path` | — | Path to the System1 TensorRT `.engine` file |
+| `s2_model_path` | — | Path to the System2 model directory |
+| `s1_device` | `cuda:0` | CUDA device for System1 |
+| `s2_device` | `cuda:1` | CUDA device for System2 |
 
-System1 runs on `cuda:0`, System2 on `cuda:1` by default (configurable in the launch file).
+After launch, activate the system via:
+
+```bash
+ros2 service call /internnav/activate std_srvs/srv/Trigger
+```
+
+Monitor system state:
+
+```bash
+ros2 topic echo /internnav/system_state
+```
 
 ## 👏 Acknowledgements
 
