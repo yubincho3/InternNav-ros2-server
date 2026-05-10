@@ -283,7 +283,6 @@ class System2(LifecycleNode):
         llm_output = llm_output.strip().upper()
 
         self.get_logger().info(f'[Step {self._s2_step}] LLM: {llm_output}')
-        self._s2_step += 1
 
         if _COORD_PATTERN.fullmatch(llm_output):
             with torch.inference_mode():
@@ -341,6 +340,9 @@ class System2(LifecycleNode):
 
         else:
             self.get_logger().warn('Unrecognized output, skipping')
+            return
+
+        self._s2_step += 1
 
 def main(args=None):
     rclpy.init(args=args)
