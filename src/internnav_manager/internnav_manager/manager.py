@@ -47,14 +47,15 @@ class InternNavManager(Node):
         self.create_service(Trigger, '/internnav/deactivate', self._deactivate_callback)
 
         self._busy = False
+        self._current_state = 'UNCONFIGURED'
         self._publish_state('INACTIVE')
-        self.get_logger().info('InternNav manager ready')
 
     def _publish_state(self, state: str):
         msg = String()
         msg.data = state
         self._state_pub.publish(msg)
-        self.get_logger().info(f'InternNav state: {state}')
+        self.get_logger().info(f'InternNav transition [{self._current_state}] -> [{state}]')
+        self._current_state = state
 
     def _call_change_state(
         self,
@@ -71,12 +72,12 @@ class InternNavManager(Node):
             try:
                 result = f.result()
             except BaseException as e:
-                self.get_logger().error(f'{node_name}: transition {transition_id} raised {e}')
+                self.get_logger().error(f'{node_name} transition {transition_id} raised {e}')
                 on_error()
                 return
 
             if result is None or not result.success:
-                self.get_logger().error(f'{node_name}: transition {transition_id} failed')
+                self.get_logger().error(f'{node_name} transition {transition_id} failed')
                 on_error()
             else:
                 on_success()
