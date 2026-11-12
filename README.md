@@ -12,13 +12,7 @@ Runs two cooperative lifecycle nodes that together perform vision-language navig
 - Install and run zenoh-bridge-ros2dds on both the server and client machines.
 - Refer to the [official documentation](https://zenoh.io/docs/getting-started/installation/).
   - The version must match on both the server and client.
-
-```bash
-echo '
-TODO!!!
-' >> <path to zenoh config>
-```
->  Zenoh config file should be a '.json5' format
+- Configure the bridge on each machine so that the two can reach each other, and pass the config file (`.json5`) with `-c` when starting the bridge.
 
 ---
 
